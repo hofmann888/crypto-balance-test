@@ -14,90 +14,40 @@ class CryptoBalanceService
     public function deposit(
         int $userId,
         int $amount,
-        string $idempotencyKey,
-        string $txHash,
         int $confirmations,
-        CryptoCurrency $currency
+        string $txHash,
+        CryptoCurrency $currency,
     ): CryptoTransaction {
-        if ($amount <= 0) {
-            throw new \InvalidArgumentException('Deposit amount must be positive.');
+        $idempotencyKey = "deposit:{$currency->value}:{$txHash}";
+
+        $existing = CryptoTransaction::where('idempotency_key', $idempotencyKey)->first();
+        if ($existing) {
+            return $existing;
         }
 
-        return DB::transaction(function () use (
-            $userId,
-            $amount,
-            $idempotencyKey,
-            $txHash,
-            $confirmations,
-            $currency
-        ): CryptoTransaction {
+        return DB::transaction(function () use ($userId, $currency, $amount, $txHash, $confirmations, $idempotencyKey) {
+
             $balance = UserCryptoBalance::lockForUpdate()
                 ->firstOrCreate(['user_id' => $userId, 'currency' => $currency]);
 
-            $tx = CryptoTransaction::query()
-                ->where('idempotency_key', $idempotencyKey)
-                ->lockForUpdate()
-                ->first();
+            $balanceBefore = $balance->balance;
+            $balanceAfter  = $balanceBefore + $amount;
 
-            $shouldConfirm = $confirmations >= $currency->requiredConfirmations();
+            $balance->update(['balance' => $balanceAfter]);
 
-            if (!$tx instanceof CryptoTransaction) {
-                $balanceBefore = $balance->balance;
-                $balanceAfter = $balanceBefore;
-                $status = CryptoTransactionStatus::PENDING;
-
-                if ($shouldConfirm) {
-                    $balanceAfter = $balanceBefore + $amount;
-                    $balance->balance = $balanceAfter;
-                    $balance->save();
-                    $status = CryptoTransactionStatus::CONFIRMED;
-                }
-
-                return CryptoTransaction::query()->create([
-                    'user_id' => $userId,
-                    'currency' => $currency,
-                    'type' => CryptoTransactionType::DEPOSIT,
-                    'status' => $status,
-                    'amount' => $amount,
-                    'balance_before' => $balanceBefore,
-                    'balance_after' => $balanceAfter,
-                    'tx_hash' => $txHash,
-                    'confirmations' => $confirmations,
-                    'required_confirmations' => $currency->requiredConfirmations(),
-                    'idempotency_key' => $idempotencyKey,
-                ]);
-            }
-
-            if ($tx->type->value !== CryptoTransactionType::DEPOSIT) {
-                throw new \RuntimeException('Idempotency key already used by another transaction type.');
-            }
-
-            if ($tx->currency->value !== $currency) {
-                throw new \RuntimeException('Currency mismatch for idempotent deposit request.');
-            }
-
-            $tx->confirmations = max($tx->confirmations, $confirmations);
-
-            if ($tx->status->value === CryptoTransactionStatus::CONFIRMED) {
-                $tx->save();
-                return $tx;
-            }
-
-            if ($shouldConfirm) {
-                $balanceBefore = $balance->balance;
-                $balanceAfter = $balanceBefore + $tx->amount;
-
-                $balance->balance = $balanceAfter;
-                $balance->save();
-
-                $tx->status = CryptoTransactionStatus::CONFIRMED;
-                $tx->balance_before = $balanceBefore;
-                $tx->balance_after = $balanceAfter;
-            }
-
-            $tx->save();
-
-            return $tx;
+            return CryptoTransaction::create([
+                'user_id'                => $userId,
+                'currency'               => $currency,
+                'type'                   => CryptoTransactionType::DEPOSIT,
+                'status'                 => CryptoTransactionStatus::CONFIRMED,
+                'amount'                 => $amount,
+                'balance_before'         => $balanceBefore,
+                'balance_after'          => $balanceAfter,
+                'tx_hash'                => $txHash,
+                'confirmations'          => $confirmations,
+                'required_confirmations' => $confirmations,
+                'idempotency_key'        => $idempotencyKey,
+            ]);
         });
     }
 
